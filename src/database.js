@@ -129,6 +129,31 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS alert_rules (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  relic_level TEXT,
+  unit TEXT,
+  risk_level TEXT,
+  overdue_days INTEGER NOT NULL DEFAULT 7,
+  is_enabled INTEGER DEFAULT 1,
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS alert_records (
+  id TEXT PRIMARY KEY,
+  rule_id TEXT NOT NULL,
+  biz_type TEXT NOT NULL,
+  biz_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT,
+  user_id TEXT,
+  is_read INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  FOREIGN KEY (rule_id) REFERENCES alert_rules(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_relics_code ON relics(code);
 CREATE INDEX IF NOT EXISTS idx_relics_unit ON relics(unit);
 CREATE INDEX IF NOT EXISTS idx_tasks_relic ON tasks(relic_id);
@@ -146,9 +171,30 @@ CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(is_read);
 CREATE INDEX IF NOT EXISTS idx_audit_biz ON audit_logs(biz_type, biz_id);
 CREATE INDEX IF NOT EXISTS idx_audit_operator ON audit_logs(operator_id);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action);
+CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled ON alert_rules(is_enabled);
+CREATE INDEX IF NOT EXISTS idx_alert_records_rule ON alert_records(rule_id);
+CREATE INDEX IF NOT EXISTS idx_alert_records_biz ON alert_records(biz_type, biz_id);
+CREATE INDEX IF NOT EXISTS idx_alert_records_user ON alert_records(user_id);
 `;
 
 db.exec(initSQL);
+
+const migrations = [
+  { table: "rectifications", column: "rectify_plan", type: "TEXT" },
+  { table: "rectifications", column: "process_feedback", type: "TEXT" },
+  { table: "rectifications", column: "extension_request", type: "TEXT" },
+  { table: "rectifications", column: "review_comment", type: "TEXT" },
+  { table: "rectifications", column: "previous_review_result", type: "TEXT" },
+  { table: "rectifications", column: "previous_review_comment", type: "TEXT" },
+  { table: "rectifications", column: "supervised", type: "INTEGER DEFAULT 0" },
+];
+
+for (const mig of migrations) {
+  try {
+    db.exec(`ALTER TABLE ${mig.table} ADD COLUMN ${mig.column} ${mig.type}`);
+  } catch (_e) {
+  }
+}
 
 const seedUser = db.prepare("SELECT COUNT(*) AS cnt FROM users").get();
 if (seedUser.cnt === 0) {
@@ -160,6 +206,17 @@ if (seedUser.cnt === 0) {
   insertUser.run(uuidv4(), "inspector1", "123456", "张巡检", "inspector", "第一巡检站");
   insertUser.run(uuidv4(), "inspector2", "123456", "李巡检", "inspector", "第二巡检站");
   insertUser.run(uuidv4(), "supervisor1", "123456", "王监管", "supervisor", "监管中心");
+}
+
+const seedRules = db.prepare("SELECT COUNT(*) AS cnt FROM alert_rules").get();
+if (seedRules.cnt === 0) {
+  const { v4: uuidv4 } = require("uuid");
+  const insertRule = db.prepare(
+    "INSERT INTO alert_rules (id, name, relic_level, unit, risk_level, overdue_days, is_enabled) VALUES (?, ?, ?, ?, ?, ?, 1)"
+  );
+  insertRule.run(uuidv4(), "国家级文物高风险预警", "国家级", null, "high", 3);
+  insertRule.run(uuidv4(), "省级文物中风险预警", "省级", null, "medium", 7);
+  insertRule.run(uuidv4(), "通用逾期巡检预警", null, null, null, 7);
 }
 
 module.exports = db;

@@ -18,6 +18,7 @@ app.use("/api/records", authMiddleware, require("./routes/record"));
 app.use("/api/rectifications", authMiddleware, require("./routes/rectify"));
 app.use("/api/media", authMiddleware, require("./routes/media"));
 app.use("/api/notifications", authMiddleware, require("./routes/notify"));
+app.use("/api/alert-rules", authMiddleware, require("./routes/alert"));
 app.use("/api/stats", authMiddleware, require("./routes/stats"));
 
 app.get("/api/error-codes", (_req, res) => {

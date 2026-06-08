@@ -108,48 +108,68 @@ router.get("/supervision-list", (req, res, next) => {
   }
 });
 
+function buildDashboardFilter(req) {
+  const { unit, risk_level, overdue, rectify_stage } = req.query;
+  const today = now().slice(0, 10);
+  const filter = { where: "WHERE 1=1", params: [], today };
+
+  if (unit) { filter.where += " AND rl.unit = ?"; filter.params.push(unit); }
+  if (risk_level) { filter.where += " AND rc.risk_level = ?"; filter.params.push(risk_level); }
+
+  if (overdue === "inspection") {
+    filter.where += ` AND EXISTS (SELECT 1 FROM tasks t WHERE t.relic_id = rc.relic_id AND t.status IN ('pending','claimed') AND t.plan_date < ?)`;
+    filter.params.push(today);
+  } else if (overdue === "rectification") {
+    filter.where += " AND rc.deadline IS NOT NULL AND rc.deadline < ? AND rc.status != 'closed'";
+    filter.params.push(today);
+  } else if (overdue === "yes") {
+    filter.where += ` AND (rc.deadline IS NOT NULL AND rc.deadline < ? AND rc.status != 'closed' OR EXISTS (SELECT 1 FROM tasks t WHERE t.relic_id = rc.relic_id AND t.status IN ('pending','claimed') AND t.plan_date < ?))`;
+    filter.params.push(today);
+    filter.params.push(today);
+  }
+
+  if (rectify_stage) {
+    if (rectify_stage === "pending") { filter.where += " AND rc.status IN ('pending','assigned')"; }
+    else if (rectify_stage === "rectified") { filter.where += " AND rc.status = 'rectified'"; }
+    else if (rectify_stage === "closed") { filter.where += " AND rc.status = 'closed'"; }
+  }
+
+  filter.unit = unit;
+  filter.risk_level = risk_level;
+  return filter;
+}
+
 router.get("/risk-dashboard", (req, res, next) => {
   try {
-    const { unit, risk_level, overdue, rectify_stage } = req.query;
-    const today = now().slice(0, 10);
-
-    let where = "WHERE 1=1";
-    const params = [];
-    if (unit) { where += " AND rl.unit = ?"; params.push(unit); }
-    if (risk_level) { where += " AND rc.risk_level = ?"; params.push(risk_level); }
-    if (overdue === "inspection") {
-      where += ` AND EXISTS (SELECT 1 FROM tasks t WHERE t.relic_id = rc.relic_id AND t.status IN ('pending','claimed') AND t.plan_date < ?)`;
-      params.push(today);
-    } else if (overdue === "rectification") {
-      where += " AND rc.deadline IS NOT NULL AND rc.deadline < ? AND rc.status != 'closed'";
-      params.push(today);
-    } else if (overdue === "yes") {
-      where += ` AND (rc.deadline IS NOT NULL AND rc.deadline < ? AND rc.status != 'closed' OR EXISTS (SELECT 1 FROM tasks t WHERE t.relic_id = rc.relic_id AND t.status IN ('pending','claimed') AND t.plan_date < ?))`;
-      params.push(today);
-      params.push(today);
-    }
-    if (rectify_stage) {
-      if (rectify_stage === "pending") { where += " AND rc.status IN ('pending','assigned')"; }
-      else if (rectify_stage === "rectified") { where += " AND rc.status = 'rectified'"; }
-      else if (rectify_stage === "closed") { where += " AND rc.status = 'closed'"; }
-    }
+    const f = buildDashboardFilter(req);
+    const RISK_SORT = "CASE rc.risk_level WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END";
 
     const rows = db.prepare(
-      `SELECT rc.*, rl.name AS relic_name, rl.unit, rl.level AS relic_level, u.name AS responsible_name, CASE rc.risk_level WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END AS risk_sort FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id LEFT JOIN users u ON rc.responsible_id = u.id ${where} ORDER BY risk_sort ASC, rc.deadline ASC`
-    ).all(...params);
+      `SELECT rc.*, rl.name AS relic_name, rl.unit, rl.level AS relic_level, u.name AS responsible_name, ${RISK_SORT} AS risk_sort FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id LEFT JOIN users u ON rc.responsible_id = u.id ${f.where} ORDER BY risk_sort ASC, rc.deadline ASC`
+    ).all(...f.params);
     for (const row of rows) { delete row.risk_sort; }
 
+    let hruWhere = "WHERE rc.risk_level = 'high' AND rc.status != 'closed'";
+    const hruParams = [];
+    if (f.unit) { hruWhere += " AND rl.unit = ?"; hruParams.push(f.unit); }
     const highRiskUnclosed = db.prepare(
-      `SELECT rc.*, rl.name AS relic_name, rl.unit, u.name AS responsible_name FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id LEFT JOIN users u ON rc.responsible_id = u.id WHERE rc.risk_level = 'high' AND rc.status != 'closed' ORDER BY CASE rc.status WHEN 'pending' THEN 1 WHEN 'assigned' THEN 2 WHEN 'rectified' THEN 3 ELSE 4 END, rc.deadline ASC`
-    ).all();
+      `SELECT rc.*, rl.name AS relic_name, rl.unit, u.name AS responsible_name FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id LEFT JOIN users u ON rc.responsible_id = u.id ${hruWhere} ORDER BY CASE rc.status WHEN 'pending' THEN 1 WHEN 'assigned' THEN 2 WHEN 'rectified' THEN 3 ELSE 4 END, rc.deadline ASC`
+    ).all(...hruParams);
 
+    let oiWhere = "WHERE t.status IN ('pending','claimed') AND t.plan_date < ?";
+    const oiParams = [f.today];
+    if (f.unit) { oiWhere += " AND rl.unit = ?"; oiParams.push(f.unit); }
     const overdueInspection = db.prepare(
-      `SELECT t.*, rl.name AS relic_name, rl.unit, u.name AS assignee_name FROM tasks t LEFT JOIN relics rl ON t.relic_id = rl.id LEFT JOIN users u ON t.assignee_id = u.id WHERE t.status IN ('pending','claimed') AND t.plan_date < ? ORDER BY t.plan_date ASC`
-    ).all(today);
+      `SELECT t.*, rl.name AS relic_name, rl.unit, u.name AS assignee_name FROM tasks t LEFT JOIN relics rl ON t.relic_id = rl.id LEFT JOIN users u ON t.assignee_id = u.id ${oiWhere} ORDER BY t.plan_date ASC`
+    ).all(...oiParams);
 
+    let orWhere = "WHERE rc.deadline IS NOT NULL AND rc.deadline < ? AND rc.status != 'closed'";
+    const orParams = [f.today];
+    if (f.unit) { orWhere += " AND rl.unit = ?"; orParams.push(f.unit); }
+    if (f.risk_level) { orWhere += " AND rc.risk_level = ?"; orParams.push(f.risk_level); }
     const overdueRectification = db.prepare(
-      `SELECT rc.*, rl.name AS relic_name, rl.unit, u.name AS responsible_name FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id LEFT JOIN users u ON rc.responsible_id = u.id WHERE rc.deadline IS NOT NULL AND rc.deadline < ? AND rc.status != 'closed' ORDER BY CASE rc.risk_level WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, rc.deadline ASC`
-    ).all(today);
+      `SELECT rc.*, rl.name AS relic_name, rl.unit, u.name AS responsible_name FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id LEFT JOIN users u ON rc.responsible_id = u.id ${orWhere} ORDER BY ${RISK_SORT}, rc.deadline ASC`
+    ).all(...orParams);
 
     res.json(success({
       filtered: rows,
