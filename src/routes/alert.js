@@ -90,21 +90,22 @@ router.post("/trigger", (req, res, next) => {
         overdueDate.setDate(overdueDate.getDate() - rule.overdue_days);
         const overdueDateStr = overdueDate.toISOString().slice(0, 10);
 
-        let rcWhere = "WHERE rc.status != 'closed' AND rc.created_at <= ?";
-        const rcParams = [now()];
+        let rcWhere = "WHERE rc.status != 'closed' AND rc.deadline IS NOT NULL AND julianday(?) - julianday(rc.deadline) >= ?";
+        const rcParams = [today, rule.overdue_days];
         if (rule.relic_level) { rcWhere += " AND rl.level = ?"; rcParams.push(rule.relic_level); }
         if (rule.unit) { rcWhere += " AND rl.unit = ?"; rcParams.push(rule.unit); }
         if (rule.risk_level) { rcWhere += " AND rc.risk_level = ?"; rcParams.push(rule.risk_level); }
 
         const overdueRects = db.prepare(
-          `SELECT rc.id, rc.hazard_desc, rc.risk_level, rl.name AS relic_name, rl.level AS relic_level, rl.unit, rc.responsible_id FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id ${rcWhere}`
+          `SELECT rc.id, rc.hazard_desc, rc.risk_level, rc.deadline, rl.name AS relic_name, rl.level AS relic_level, rl.unit, rc.responsible_id FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id ${rcWhere}`
         ).all(...rcParams);
 
         for (const rc of overdueRects) {
           const dup = checkDup.get(rule.id, "rectification", rc.id, today);
           if (dup) continue;
+          const overdueDays = Math.floor((new Date(today) - new Date(rc.deadline)) / 86400000);
           const title = `【${rule.name}】整改预警`;
-          const content = `文物「${rc.relic_name}」的整改记录触发规则「${rule.name}」，风险等级：${rc.risk_level}，隐患：${rc.hazard_desc || ""}`;
+          const content = `文物「${rc.relic_name}」的整改已逾期 ${overdueDays} 天（阈值 ${rule.overdue_days} 天），触发规则「${rule.name}」，风险等级：${rc.risk_level}，隐患：${rc.hazard_desc || ""}`;
           insertAlert.run(genId(), rule.id, "rectification", rc.id, title, content, rc.responsible_id);
           totalTriggered++;
         }

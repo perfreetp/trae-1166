@@ -165,20 +165,21 @@ router.get("/supervision/list", (req, res, next) => {
   try {
     const { page, pageSize, offset } = parsePage(req.query);
     const { unit, risk_level } = req.query;
-    let where = "WHERE rc.supervised = 1 AND rc.status != 'closed'";
-    const params = [];
+    const today = now().slice(0, 10);
+    let where = "WHERE rc.deadline IS NOT NULL AND rc.deadline < ? AND rc.status != 'closed'";
+    const params = [today];
     if (unit) { where += " AND rl.unit = ?"; params.push(unit); }
     if (risk_level) { where += " AND rc.risk_level = ?"; params.push(risk_level); }
     const total = db.prepare(`SELECT COUNT(*) AS cnt FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id ${where}`).get(...params).cnt;
     const rows = db.prepare(
       `SELECT rc.*, rl.name AS relic_name, rl.unit, u.name AS responsible_name, CASE rc.risk_level WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END AS risk_sort FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id LEFT JOIN users u ON rc.responsible_id = u.id ${where} ORDER BY risk_sort ASC, rc.deadline ASC LIMIT ? OFFSET ?`
     ).all(...params, pageSize, offset);
-    const today = now().slice(0, 10);
     for (const row of rows) {
       delete row.risk_sort;
       if (row.deadline) {
         row.overdue_days = Math.max(0, Math.ceil((new Date(today) - new Date(row.deadline)) / 86400000));
       }
+      row.supervision_reason = `整改期限 ${row.deadline}，已逾期 ${row.overdue_days || 0} 天，当前状态 ${row.status}${row.supervised ? "，已自动打标" : ""}`;
     }
     res.json(paginate(rows, total, page, pageSize));
   } catch (err) {
