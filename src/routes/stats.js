@@ -1,6 +1,7 @@
 const express = require("express");
 const db = require("../database");
 const { success, AppError } = require("../utils/errors");
+const { now } = require("../utils/helpers");
 
 const router = express.Router();
 
@@ -16,10 +17,13 @@ router.get("/overview", (req, res, next) => {
     const rectifyRectified = db.prepare("SELECT COUNT(*) AS cnt FROM rectifications WHERE status = 'rectified'").get().cnt;
     const rectifyClosed = db.prepare("SELECT COUNT(*) AS cnt FROM rectifications WHERE status = 'closed'").get().cnt;
     const highRisk = db.prepare("SELECT COUNT(*) AS cnt FROM rectifications WHERE risk_level = 'high' AND status != 'closed'").get().cnt;
+    const today = now().slice(0, 10);
+    const overdueTasks = db.prepare("SELECT COUNT(*) AS cnt FROM tasks WHERE status IN ('pending','claimed') AND plan_date < ?").get(today).cnt;
+    const overdueRectify = db.prepare("SELECT COUNT(*) AS cnt FROM rectifications WHERE deadline IS NOT NULL AND deadline < ? AND status != 'closed'").get(today).cnt;
     res.json(success({
       relics: { total: relicTotal },
-      tasks: { total: taskTotal, pending: taskPending, claimed: taskClaimed, submitted: taskSubmitted },
-      rectifications: { total: rectifyTotal, pending: rectifyPending, rectified: rectifyRectified, closed: rectifyClosed },
+      tasks: { total: taskTotal, pending: taskPending, claimed: taskClaimed, submitted: taskSubmitted, overdue: overdueTasks },
+      rectifications: { total: rectifyTotal, pending: rectifyPending, rectified: rectifyRectified, closed: rectifyClosed, overdue: overdueRectify },
       highRisk,
     }));
   } catch (err) {
@@ -30,21 +34,24 @@ router.get("/overview", (req, res, next) => {
 router.get("/unit-progress", (req, res, next) => {
   try {
     const rows = db.prepare(`
-      SELECT r.unit,
-        COUNT(DISTINCT r.id) AS relic_count,
-        COUNT(DISTINCT t.id) AS task_count,
-        SUM(CASE WHEN t.status = 'submitted' THEN 1 ELSE 0 END) AS submitted_count,
-        SUM(CASE WHEN t.status IN ('pending','claimed') THEN 1 ELSE 0 END) AS pending_count,
-        COUNT(DISTINCT rc.id) AS rectify_count,
-        SUM(CASE WHEN rc.status = 'closed' THEN 1 ELSE 0 END) AS rectify_closed
-      FROM relics r
-      LEFT JOIN tasks t ON t.relic_id = r.id
-      LEFT JOIN rectifications rc ON rc.relic_id = r.id
-      GROUP BY r.unit
-      ORDER BY r.unit
+      SELECT rl.unit,
+        COUNT(DISTINCT rl.id) AS relic_count,
+        (SELECT COUNT(*) FROM tasks t WHERE t.relic_id IN (SELECT id FROM relics WHERE unit = rl.unit)) AS task_count,
+        (SELECT COUNT(*) FROM tasks t WHERE t.relic_id IN (SELECT id FROM relics WHERE unit = rl.unit) AND t.status = 'submitted') AS submitted_count,
+        (SELECT COUNT(*) FROM tasks t WHERE t.relic_id IN (SELECT id FROM relics WHERE unit = rl.unit) AND t.status IN ('pending','claimed')) AS pending_count,
+        (SELECT COUNT(*) FROM rectifications rc WHERE rc.relic_id IN (SELECT id FROM relics WHERE unit = rl.unit)) AS rectify_count,
+        (SELECT COUNT(*) FROM rectifications rc WHERE rc.relic_id IN (SELECT id FROM relics WHERE unit = rl.unit) AND rc.status = 'closed') AS rectify_closed
+      FROM relics rl
+      GROUP BY rl.unit
+      ORDER BY rl.unit
     `).all();
+    const today = now().slice(0, 10);
     for (const row of rows) {
       row.completion_rate = row.task_count > 0 ? Math.round((row.submitted_count / row.task_count) * 100) : 0;
+      row.rectify_closure_rate = row.rectify_count > 0 ? Math.round((row.rectify_closed / row.rectify_count) * 100) : 0;
+      const overdueTasks = db.prepare("SELECT COUNT(*) AS cnt FROM tasks t WHERE t.relic_id IN (SELECT id FROM relics WHERE unit = ?) AND t.status IN ('pending','claimed') AND t.plan_date < ?").get(row.unit, today).cnt;
+      row.overdue_count = overdueTasks;
+      row.overdue_rate = row.task_count > 0 ? Math.round((overdueTasks / row.task_count) * 100) : 0;
     }
     res.json(success(rows));
   } catch (err) {
@@ -122,23 +129,196 @@ router.get("/report", (req, res, next) => {
       where += " AND rl.unit = ?";
       params.push(unit);
     }
+
     const inspectionCount = db.prepare(`SELECT COUNT(*) AS cnt FROM records r LEFT JOIN relics rl ON r.relic_id = rl.id ${where}`).get(...params).cnt;
     const highRiskCount = db.prepare(
       `SELECT COUNT(*) AS cnt FROM records r LEFT JOIN relics rl ON r.relic_id = rl.id ${where} AND r.risk_level = 'high'`
     ).get(...params).cnt;
-    const rectifyCount = db.prepare(`SELECT COUNT(*) AS cnt FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id ${where.replace(/r\./g, "rc.")}`).get(...params).cnt;
+
+    let rcWhere = "WHERE 1=1";
+    const rcParams = [];
+    if (start_date) { rcWhere += " AND rc.created_at >= ?"; rcParams.push(start_date); }
+    if (end_date) { rcWhere += " AND rc.created_at <= ?"; rcParams.push(end_date); }
+    if (unit) { rcWhere += " AND rl.unit = ?"; rcParams.push(unit); }
+
+    const rectifyCount = db.prepare(`SELECT COUNT(*) AS cnt FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id ${rcWhere}`).get(...rcParams).cnt;
     const rectifyClosedCount = db.prepare(
-      `SELECT COUNT(*) AS cnt FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id ${where.replace(/r\./g, "rc.")} AND rc.status = 'closed'`
-    ).get(...params).cnt;
+      `SELECT COUNT(*) AS cnt FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id ${rcWhere} AND rc.status = 'closed'`
+    ).get(...rcParams).cnt;
+
+    let taskWhere = "WHERE 1=1";
+    const taskParams = [];
+    if (start_date) { taskWhere += " AND t.created_at >= ?"; taskParams.push(start_date); }
+    if (end_date) { taskWhere += " AND t.created_at <= ?"; taskParams.push(end_date); }
+    if (unit) { taskWhere += " AND rl.unit = ?"; taskParams.push(unit); }
+
+    const taskCount = db.prepare(`SELECT COUNT(*) AS cnt FROM tasks t LEFT JOIN relics rl ON t.relic_id = rl.id ${taskWhere}`).get(...taskParams).cnt;
+    const taskSubmittedCount = db.prepare(`SELECT COUNT(*) AS cnt FROM tasks t LEFT JOIN relics rl ON t.relic_id = rl.id ${taskWhere} AND t.status = 'submitted'`).get(...taskParams).cnt;
+
+    const today = now().slice(0, 10);
+    let overdueWhere = "WHERE t.status IN ('pending','claimed') AND t.plan_date < ?";
+    const overdueParams = [today];
+    if (start_date) { overdueWhere += " AND t.created_at >= ?"; overdueParams.push(start_date); }
+    if (end_date) { overdueWhere += " AND t.created_at <= ?"; overdueParams.push(end_date); }
+    if (unit) { overdueWhere += " AND rl.unit = ?"; overdueParams.push(unit); }
+    const overdueTaskCount = db.prepare(`SELECT COUNT(*) AS cnt FROM tasks t LEFT JOIN relics rl ON t.relic_id = rl.id ${overdueWhere}`).get(...overdueParams).cnt;
+
     const unitBreakdown = db.prepare(`
-      SELECT rl.unit, COUNT(DISTINCT r.id) AS inspection_count, SUM(CASE WHEN r.risk_level = 'high' THEN 1 ELSE 0 END) AS high_risk
+      SELECT rl.unit,
+        COUNT(DISTINCT r.id) AS inspection_count,
+        SUM(CASE WHEN r.risk_level = 'high' THEN 1 ELSE 0 END) AS high_risk,
+        (SELECT COUNT(*) FROM tasks t WHERE t.relic_id IN (SELECT id FROM relics WHERE unit = rl.unit) ${start_date ? "AND t.created_at >= '" + start_date + "'" : ""} ${end_date ? "AND t.created_at <= '" + end_date + "'" : ""}) AS task_count,
+        (SELECT COUNT(*) FROM tasks t WHERE t.relic_id IN (SELECT id FROM relics WHERE unit = rl.unit) AND t.status = 'submitted' ${start_date ? "AND t.created_at >= '" + start_date + "'" : ""} ${end_date ? "AND t.created_at <= '" + end_date + "'" : ""}) AS task_submitted
       FROM records r LEFT JOIN relics rl ON r.relic_id = rl.id ${where} GROUP BY rl.unit
     `).all(...params);
+    for (const ub of unitBreakdown) {
+      ub.completion_rate = ub.task_count > 0 ? Math.round((ub.task_submitted / ub.task_count) * 100) : 0;
+    }
+
     res.json(success({
-      period: { start_date, end_date },
-      summary: { inspectionCount, highRiskCount, rectifyCount, rectifyClosedCount },
+      period: { start_date: start_date || null, end_date: end_date || null },
+      summary: {
+        inspectionCount,
+        highRiskCount,
+        taskCount,
+        taskSubmittedCount,
+        completionRate: taskCount > 0 ? Math.round((taskSubmittedCount / taskCount) * 100) : 0,
+        rectifyCount,
+        rectifyClosedCount,
+        rectifyClosureRate: rectifyCount > 0 ? Math.round((rectifyClosedCount / rectifyCount) * 100) : 0,
+        overdueTaskCount,
+        overdueRate: taskCount > 0 ? Math.round((overdueTaskCount / taskCount) * 100) : 0,
+      },
       unitBreakdown,
     }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/audit-logs", (req, res, next) => {
+  try {
+    const { biz_type, biz_id, action, operator_id, start_date, end_date, page, pageSize } = req.query;
+    const pPage = Math.max(1, parseInt(page) || 1);
+    const pPageSize = Math.min(100, Math.max(1, parseInt(pageSize) || 20));
+    const offset = (pPage - 1) * pPageSize;
+
+    let where = "WHERE 1=1";
+    const params = [];
+    if (biz_type) { where += " AND a.biz_type = ?"; params.push(biz_type); }
+    if (biz_id) { where += " AND a.biz_id = ?"; params.push(biz_id); }
+    if (action) { where += " AND a.action = ?"; params.push(action); }
+    if (operator_id) { where += " AND a.operator_id = ?"; params.push(operator_id); }
+    if (start_date) { where += " AND a.created_at >= ?"; params.push(start_date); }
+    if (end_date) { where += " AND a.created_at <= ?"; params.push(end_date); }
+
+    const total = db.prepare(`SELECT COUNT(*) AS cnt FROM audit_logs a ${where}`).get(...params).cnt;
+    const rows = db.prepare(`SELECT * FROM audit_logs a ${where} ORDER BY a.created_at DESC LIMIT ? OFFSET ?`).all(...params, pPageSize, offset);
+    res.json({
+      code: 0,
+      message: "success",
+      data: { list: rows, total, page: pPage, pageSize: pPageSize, totalPages: Math.ceil(total / pPageSize) },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/audit-logs/by-relic/:relic_id", (req, res, next) => {
+  try {
+    const { relic_id } = req.params;
+    const taskIds = db.prepare("SELECT id FROM tasks WHERE relic_id = ?").all(relic_id).map((t) => t.id);
+    const recordIds = db.prepare("SELECT id FROM records WHERE relic_id = ?").all(relic_id).map((r) => r.id);
+    const rectifyIds = db.prepare("SELECT id FROM rectifications WHERE relic_id = ?").all(relic_id).map((r) => r.id);
+
+    const clauses = ["(a.biz_type = 'relic' AND a.biz_id = ?)"];
+    const params = [relic_id];
+    for (const tid of taskIds) { clauses.push("(a.biz_type = 'task' AND a.biz_id = ?)"); params.push(tid); }
+    for (const rid of recordIds) { clauses.push("(a.biz_type = 'record' AND a.biz_id = ?)"); params.push(rid); }
+    for (const rcid of rectifyIds) { clauses.push("(a.biz_type = 'rectification' AND a.biz_id = ?)"); params.push(rcid); }
+
+    const where = `WHERE ${clauses.join(" OR ")}`;
+    const rows = db.prepare(`SELECT * FROM audit_logs a ${where} ORDER BY a.created_at DESC`).all(...params);
+    res.json(success(rows));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/audit-logs/by-task/:task_id", (req, res, next) => {
+  try {
+    const { task_id } = req.params;
+    const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(task_id);
+    if (!task) return next(new AppError("TASK_NOT_FOUND"));
+    const recordIds = db.prepare("SELECT id FROM records WHERE task_id = ?").all(task_id).map((r) => r.id);
+
+    const clauses = ["(a.biz_type = 'task' AND a.biz_id = ?)"];
+    const params = [task_id];
+    for (const rid of recordIds) { clauses.push("(a.biz_type = 'record' AND a.biz_id = ?)"); params.push(rid); }
+
+    const where = `WHERE ${clauses.join(" OR ")}`;
+    const rows = db.prepare(`SELECT * FROM audit_logs a ${where} ORDER BY a.created_at DESC`).all(...params);
+    res.json(success(rows));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/report/export", (req, res, next) => {
+  try {
+    const { start_date, end_date, unit } = req.query;
+    let where = "WHERE 1=1";
+    const params = [];
+    if (start_date) { where += " AND r.created_at >= ?"; params.push(start_date); }
+    if (end_date) { where += " AND r.created_at <= ?"; params.push(end_date); }
+    if (unit) { where += " AND rl.unit = ?"; params.push(unit); }
+
+    const inspectionCount = db.prepare(`SELECT COUNT(*) AS cnt FROM records r LEFT JOIN relics rl ON r.relic_id = rl.id ${where}`).get(...params).cnt;
+
+    let rcWhere = "WHERE 1=1";
+    const rcParams = [];
+    if (start_date) { rcWhere += " AND rc.created_at >= ?"; rcParams.push(start_date); }
+    if (end_date) { rcWhere += " AND rc.created_at <= ?"; rcParams.push(end_date); }
+    if (unit) { rcWhere += " AND rl.unit = ?"; rcParams.push(unit); }
+    const rectifyCount = db.prepare(`SELECT COUNT(*) AS cnt FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id ${rcWhere}`).get(...rcParams).cnt;
+    const rectifyClosedCount = db.prepare(`SELECT COUNT(*) AS cnt FROM rectifications rc LEFT JOIN relics rl ON rc.relic_id = rl.id ${rcWhere} AND rc.status = 'closed'`).get(...rcParams).cnt;
+
+    let taskWhere = "WHERE 1=1";
+    const taskParams = [];
+    if (start_date) { taskWhere += " AND t.created_at >= ?"; taskParams.push(start_date); }
+    if (end_date) { taskWhere += " AND t.created_at <= ?"; taskParams.push(end_date); }
+    if (unit) { taskWhere += " AND rl.unit = ?"; taskParams.push(unit); }
+    const taskCount = db.prepare(`SELECT COUNT(*) AS cnt FROM tasks t LEFT JOIN relics rl ON t.relic_id = rl.id ${taskWhere}`).get(...taskParams).cnt;
+    const taskSubmittedCount = db.prepare(`SELECT COUNT(*) AS cnt FROM tasks t LEFT JOIN relics rl ON t.relic_id = rl.id ${taskWhere} AND t.status = 'submitted'`).get(...taskParams).cnt;
+
+    const today = now().slice(0, 10);
+    let overdueWhere = "WHERE t.status IN ('pending','claimed') AND t.plan_date < ?";
+    const overdueParams = [today];
+    if (start_date) { overdueWhere += " AND t.created_at >= ?"; overdueParams.push(start_date); }
+    if (end_date) { overdueWhere += " AND t.created_at <= ?"; overdueParams.push(end_date); }
+    if (unit) { overdueWhere += " AND rl.unit = ?"; overdueParams.push(unit); }
+    const overdueTaskCount = db.prepare(`SELECT COUNT(*) AS cnt FROM tasks t LEFT JOIN relics rl ON t.relic_id = rl.id ${overdueWhere}`).get(...overdueParams).cnt;
+
+    const reportData = {
+      export_time: now(),
+      period: { start_date: start_date || null, end_date: end_date || null },
+      unit: unit || null,
+      summary: {
+        inspectionCount,
+        taskCount,
+        taskSubmittedCount,
+        completionRate: taskCount > 0 ? Math.round((taskSubmittedCount / taskCount) * 100) : 0,
+        rectifyCount,
+        rectifyClosedCount,
+        rectifyClosureRate: rectifyCount > 0 ? Math.round((rectifyClosedCount / rectifyCount) * 100) : 0,
+        overdueTaskCount,
+        overdueRate: taskCount > 0 ? Math.round((overdueTaskCount / taskCount) * 100) : 0,
+      },
+    };
+
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", `attachment; filename="report_${today}.json"`);
+    res.json(reportData);
   } catch (err) {
     next(err);
   }

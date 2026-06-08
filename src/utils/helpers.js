@@ -37,6 +37,18 @@ function calculateRiskLevel(damageParts, damageDesc) {
   return "low";
 }
 
+const VALID_CYCLES = ["daily", "weekly", "monthly", "quarterly", "yearly"];
+
+const RISK_ORDER = { high: 1, medium: 2, low: 3, none: 4 };
+
+function isValidDate(str) {
+  if (!str || typeof str !== "string") return false;
+  const match = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+  const d = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return d.getFullYear() === Number(match[1]) && d.getMonth() === Number(match[2]) - 1 && d.getDate() === Number(match[3]);
+}
+
 function generateCycleDates(cycle, startDate, count) {
   const dates = [];
   const start = new Date(startDate);
@@ -74,4 +86,7 @@ module.exports = {
   now,
   calculateRiskLevel,
   generateCycleDates,
+  VALID_CYCLES,
+  RISK_ORDER,
+  isValidDate,
 };

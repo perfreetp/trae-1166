@@ -2,6 +2,7 @@ const express = require("express");
 const db = require("../database");
 const { success, paginate, AppError } = require("../utils/errors");
 const { genId, parsePage, now } = require("../utils/helpers");
+const { writeAuditFromReq } = require("../utils/audit");
 
 const router = express.Router();
 
@@ -61,6 +62,7 @@ router.put("/:id/assign", (req, res, next) => {
     const { responsible_id } = req.body;
     if (!responsible_id) return next(new AppError("PARAM_MISSING", "responsible_id 为必填项"));
     db.prepare("UPDATE rectifications SET responsible_id = ?, status = 'assigned', updated_at = ? WHERE id = ?").run(responsible_id, now(), req.params.id);
+    writeAuditFromReq(req, "assign_rectification", "rectification", req.params.id, `分配整改责任人：${responsible_id}`);
     const updated = db.prepare("SELECT * FROM rectifications WHERE id = ?").get(req.params.id);
     res.json(success(updated, "责任人已分配"));
   } catch (err) {
@@ -93,6 +95,7 @@ router.put("/:id/review", (req, res, next) => {
     db.prepare(
       "UPDATE rectifications SET reviewer_id = ?, review_result = ?, status = ?, reviewed_at = ?, updated_at = ? WHERE id = ?"
     ).run(req.user.id, review_result, finalStatus, now(), now(), req.params.id);
+    writeAuditFromReq(req, "review_rectification", "rectification", req.params.id, review_result === "pass" ? "复查通过，整改关闭" : "复查未通过，需重新整改");
     const updated = db.prepare("SELECT * FROM rectifications WHERE id = ?").get(req.params.id);
     res.json(success(updated, review_result === "pass" ? "复查通过，整改关闭" : "复查未通过，需重新整改"));
   } catch (err) {

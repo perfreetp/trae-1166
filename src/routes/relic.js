@@ -2,6 +2,7 @@ const express = require("express");
 const db = require("../database");
 const { success, paginate, AppError } = require("../utils/errors");
 const { genId, parsePage, like, now } = require("../utils/helpers");
+const { writeAuditFromReq } = require("../utils/audit");
 
 const router = express.Router();
 
@@ -16,6 +17,7 @@ router.post("/", (req, res, next) => {
       `INSERT INTO relics (id,code,name,category,era,level,location,longitude,latitude,area,description,unit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
     ).run(id, code, name, category, era, level, location, longitude, latitude, area, description, unit);
     const relic = db.prepare("SELECT * FROM relics WHERE id = ?").get(id);
+    writeAuditFromReq(req, "create_relic", "relic", id, `创建文物：${name}，编号：${code}`);
     res.status(201).json(success(relic, "文物档案创建成功"));
   } catch (err) {
     next(err);

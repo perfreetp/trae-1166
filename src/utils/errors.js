@@ -17,6 +17,12 @@ const ERROR_CODES = {
   TASK_NOT_CLAIMED: { code: 40003, http: 400, msg: "任务尚未领取，无法提交" },
   TASK_WRONG_ASSIGNEE: { code: 40004, http: 403, msg: "非任务负责人，无权操作" },
   RECTIFY_ALREADY_CLOSED: { code: 40005, http: 409, msg: "整改已关闭，不可再操作" },
+  RECORD_RELIC_MISMATCH: { code: 40006, http: 400, msg: "记录所属文物与任务关联文物不一致" },
+  TASK_NOT_CLAIMED_BY_YOU: { code: 40007, http: 403, msg: "任务未由当前用户领取，无法提交记录" },
+  TASK_ALREADY_HAS_RECORD: { code: 40008, http: 409, msg: "该任务已有关联记录，不可重复提交" },
+  CYCLE_INVALID: { code: 40009, http: 400, msg: "周期类型不合法" },
+  DATE_INVALID: { code: 40010, http: 400, msg: "日期格式不合法" },
+  COUNT_INVALID: { code: 40011, http: 400, msg: "生成数量不合法" },
 
   UPLOAD_FAILED: { code: 50001, http: 500, msg: "文件上传失败" },
   UPLOAD_TYPE_NOT_ALLOWED: { code: 50002, http: 400, msg: "不支持的文件类型" },

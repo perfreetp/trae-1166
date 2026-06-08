@@ -118,6 +118,17 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id TEXT PRIMARY KEY,
+  action TEXT NOT NULL,
+  biz_type TEXT NOT NULL,
+  biz_id TEXT NOT NULL,
+  operator_id TEXT NOT NULL,
+  operator_name TEXT,
+  detail TEXT,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_relics_code ON relics(code);
 CREATE INDEX IF NOT EXISTS idx_relics_unit ON relics(unit);
 CREATE INDEX IF NOT EXISTS idx_tasks_relic ON tasks(relic_id);
@@ -132,6 +143,9 @@ CREATE INDEX IF NOT EXISTS idx_rectifications_responsible ON rectifications(resp
 CREATE INDEX IF NOT EXISTS idx_media_biz ON media(biz_type, biz_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(is_read);
+CREATE INDEX IF NOT EXISTS idx_audit_biz ON audit_logs(biz_type, biz_id);
+CREATE INDEX IF NOT EXISTS idx_audit_operator ON audit_logs(operator_id);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action);
 `;
 
 db.exec(initSQL);

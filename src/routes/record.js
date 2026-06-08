@@ -2,22 +2,47 @@ const express = require("express");
 const db = require("../database");
 const { success, paginate, AppError } = require("../utils/errors");
 const { genId, parsePage, now, calculateRiskLevel } = require("../utils/helpers");
+const { writeAuditFromReq } = require("../utils/audit");
 
 const router = express.Router();
 
 router.post("/", (req, res, next) => {
   try {
     const { task_id, relic_id, longitude, latitude, altitude, temperature, humidity, weather, damage_parts, damage_desc, risk_level, remark } = req.body;
-    if (!task_id || !relic_id) return next(new AppError("PARAM_MISSING", "task_id 和 relic_id 为必填项"));
+    if (!task_id) return next(new AppError("PARAM_MISSING", "task_id 为必填项"));
+
     const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(task_id);
     if (!task) return next(new AppError("TASK_NOT_FOUND"));
+    if (task.status === "pending") return next(new AppError("TASK_NOT_CLAIMED", "任务尚未领取，无法提交记录"));
+    if (task.status === "submitted") return next(new AppError("TASK_ALREADY_SUBMITTED", "任务已提交，不可再添加记录"));
+    if (task.assignee_id !== req.user.id) return next(new AppError("TASK_NOT_CLAIMED_BY_YOU"));
+
+    const effectiveRelicId = relic_id || task.relic_id;
+    if (relic_id && relic_id !== task.relic_id) {
+      return next(new AppError("RECORD_RELIC_MISMATCH", `该任务关联文物为 ${task.relic_id}，与传入的 relic_id 不一致`));
+    }
+
+    const existingRecord = db.prepare("SELECT id FROM records WHERE task_id = ?").get(task_id);
+    if (existingRecord) return next(new AppError("TASK_ALREADY_HAS_RECORD"));
+
     const finalRiskLevel = risk_level || calculateRiskLevel(damage_parts, damage_desc);
     const id = genId();
-    db.prepare(
-      `INSERT INTO records (id,task_id,relic_id,inspector_id,longitude,latitude,altitude,temperature,humidity,weather,damage_parts,damage_desc,risk_level,remark) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-    ).run(id, task_id, relic_id, req.user.id, longitude, latitude, altitude, temperature, humidity, weather, damage_parts, damage_desc, finalRiskLevel, remark);
+
+    const transaction = db.transaction(() => {
+      db.prepare(
+        `INSERT INTO records (id,task_id,relic_id,inspector_id,longitude,latitude,altitude,temperature,humidity,weather,damage_parts,damage_desc,risk_level,remark) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).run(id, task_id, effectiveRelicId, req.user.id, longitude, latitude, altitude, temperature, humidity, weather, damage_parts, damage_desc, finalRiskLevel, remark);
+
+      db.prepare("UPDATE tasks SET status = 'submitted', submitted_at = ? WHERE id = ?").run(now(), task_id);
+
+      writeAuditFromReq(req, "submit_record", "record", id, `提交巡检记录，任务：${task_id}，文物：${effectiveRelicId}，风险：${finalRiskLevel}`);
+      writeAuditFromReq(req, "submit_task", "task", task_id, `提交巡检任务（随记录自动完成）`);
+    });
+    transaction();
+
     const record = db.prepare("SELECT * FROM records WHERE id = ?").get(id);
-    res.status(201).json(success(record, "现场记录保存成功"));
+    const updatedTask = db.prepare("SELECT * FROM tasks WHERE id = ?").get(task_id);
+    res.status(201).json(success({ record, task: updatedTask }, "现场记录保存成功，任务已自动提交"));
   } catch (err) {
     next(err);
   }
